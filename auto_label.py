@@ -1,20 +1,33 @@
 from ultralytics import YOLO
-import os, torch, pathlib
+import os, torch, pathlib, argparse, time
 from torchvision import transforms
 from torchvision.io import read_image
 from torchvision.utils import save_image
+# Parser
+parser = argparse.ArgumentParser(description = "Auto labeling system")
+# Add argument
+parser.add_argument("-source",type = str,required = True, help = "Source directory contains images")
+parser.add_argument("-train_path",type = str, required = True, help = "Path to your train model")
+parser.add_argument("-destination",type = str, default = "labeled_folder", help = "Destination directory you want to save the images and lables")
+parser.add_argument("-resize_size",type = int,default = 640, help = "Resize image expected!")
+# Parse args
+args = parser.parse_args()
+unlabeled_folder = args.source
+labeled_folder = args.destination
+trained_path = args.train_path
+resize_size = args.resize_size
 
-# Path
-trained_path = "trained_models/best.pt"
+# Check path
 if not os.path.exists(trained_path):
     raise FileNotFoundError(f"Trained path {trained_path} not existed!")
+# Check pytorch model
+model_extension = pathlib.Path(trained_path).suffix
+if model_extension != ".pt":
+    raise ValueError("Trained model must be end with Pytorch extension (.pt)")
+
 # Labeled folder
-labeled_folder = "labeled_folder"
-# Unlabled folder
-unlabeled_folder = "image_backup"
 if not os.path.exists(unlabeled_folder):
     raise FileNotFoundError(f"Folder path {unlabeled_folder} not existed!")
-
 
 def resize_to_square_image(image: torch.Tensor,
                            size: int) -> torch.Tensor:
@@ -65,14 +78,18 @@ def resize_to_fix_size_v2(image: torch.Tensor,
     resize_transform = transforms.Resize(size=(new_height, downscale_width))
     # Resize to width resize if above
     return resize_transform(image)
+
 def main():
-    resize_size = 640
     # Make labeled folder
     os.makedirs(labeled_folder, exist_ok = True)
     # Yolo
     yolo = YOLO(model = trained_path)
+    image_extensions = [".png",".jpeg",".jpg"]
+
+    # Get only image file
+    image_files = [file for file in os.listdir(unlabeled_folder) if pathlib.Path(file).suffix in image_extensions]
     # Iterate
-    for file_name in os.listdir(unlabeled_folder):
+    for file_name in image_files:
         # Define file path
         file_path = os.path.join(unlabeled_folder, file_name)
         # image tensor
@@ -112,7 +129,10 @@ def main():
         # Write
         with open(destination_class_path,"w") as f:
             f.writelines(write_lines)
-
+    print(f"Labeling with {len(image_files)} files")
 
 if __name__ == "__main__":
+    start = time.perf_counter()
     main()
+    end = time.perf_counter()
+    print(f"Done in total {round(end-start,2)}s")
