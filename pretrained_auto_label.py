@@ -5,7 +5,7 @@ from torchvision import transforms
 from torchvision.io import read_image
 from torchvision.utils import save_image
 from transformers import AutoProcessor, AutoModelForCausalLM
-from PIL import Image
+from PIL import Image, ImageDraw
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base", torch_dtype=torch_dtype,
@@ -61,10 +61,12 @@ def normalized_bbox(data :dict,resized_size :int = 640):
     results = []
     # True bboxes
     for quad_box in boxes:
-        x1,y1,x3,y3 = quad_box[0], quad_box[1], quad_box[4], quad_box[5]
-        width = x3 - x1
+        x1,y1,x2,y3 = int(quad_box[0]), int(quad_box[1]), int(quad_box[2]), int(quad_box[5])
+        x_center = (x1+x2)/2
+        y_center = (y1+y3)/2
+        width = x2 - x1
         height = y3 - y1
-        results.append([x1/resized_size,y1/resized_size,width/resized_size,height/resized_size])
+        results.append((x_center/resized_size,y_center/resized_size,width/resized_size,height/resized_size))
     return results
 
 def main():
@@ -81,23 +83,20 @@ def main():
         file_path = os.path.join(unlabeled_folder, file_name)
         image = Image.open(file_path)
         # Downscale
-        image = resize_to_fix_width_size(image)
+        resized_image = resize_to_fix_width_size(image)
         # Resize to squared image
-        image = resize_to_squared_image(image,
-                                        resize = 640)
+        squared_image = resize_to_squared_image(resized_image,
+                                                resize = 640)
         # Predict boxes
-        result = predict_boxes(image = image, task_prompt ="<OCR_WITH_REGION>")
-        bboxes_result = normalized_bbox(result)
+        result = predict_boxes(image = squared_image, task_prompt ="<OCR_WITH_REGION>")
+        xywh = normalized_bbox(result)
 
         write_lines = []
-        for i in range(len(bboxes_result)):
-            # Parse str
-            bbox = [str(point) for point in bboxes_result[i]]
-            line = " ".join(bbox)
+        for i in range(len(xywh)):
+            x,y,w,h = xywh[i]
             # add class
-            line = "0 " + line + "\n"
+            line = f"0 {x} {y} {w} {h}\n"
             write_lines.append(line)
-
         # Save images
         des_file_path = os.path.join(labeled_folder,file_name)
 
@@ -109,7 +108,7 @@ def main():
             f.writelines(write_lines)
             
         # Save image
-        image.save(des_file_path)
+        squared_image.save(des_file_path)
 
     print(f"Labeling with {len(image_files)} files")
 
