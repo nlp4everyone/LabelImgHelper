@@ -1,32 +1,22 @@
+import os, torch, pathlib, argparse, time
 import uuid
-
 from transformers import AutoProcessor, AutoModelForCausalLM
-from PIL import Image
-import os, torch, pathlib, argparse, time, typing
-
-# Devine
+from PIL import Image, ImageDraw
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-# model
-model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base",
-                                             torch_dtype = torch_dtype,
-                                             trust_remote_code=True).to(device)
-# Processer
-processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base",
-                                          trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base", torch_dtype=torch_dtype,
+                                                 trust_remote_code=True).to(device)
+processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+
 # Parser
 parser = argparse.ArgumentParser(description = "Auto labeling system")
 # Add argument
 parser.add_argument("-source",type = str,required = True, help = "Source directory contains images")
 parser.add_argument("-destination",type = str, default = "labeled_folder", help = "Destination directory you want to save the images and lables")
-parser.add_argument("-resize_size",type = int,default = 640, help = "Resize image expected!")
-parser.add_argument("-batch_size",type = int,default = 2, help = "Batch size")
 # Parse args
 args = parser.parse_args()
 unlabeled_folder = args.source
 labeled_folder = args.destination
-resize_size = args.resize_size
-batch_size = args.batch_size
 
 # Labeled folder
 if not os.path.exists(unlabeled_folder):
@@ -45,49 +35,24 @@ def resize_to_squared_image(image :Image.Image,
     # Step 4: Resize the image
     return image.resize((resize, resize), Image.LANCZOS)
 
-def get_batches(iterable :typing.List, max_batch_size :int):
-    """Yield batches of max_batch_size from iterable."""
-    batch = []
-    for element in iterable:
-        batch.append(element)
-        if len(batch) >= max_batch_size:
-            yield batch
-            batch = []
-    if batch:  # Yield any remaining elements as the last batch
-        yield batch
-
 def predict_boxes(task_prompt :str,
-                  images :typing.List[Image.Image],
-                  text_input = None,
-                  image_size :int = 640) -> typing.List[dict]:
+                  image :Image.Image,
+                  text_input = None,):
     if text_input is None:
         prompt = task_prompt
     else:
         prompt = task_prompt + text_input
+    inputs = processor(text=prompt, images=image, return_tensors="pt").to(device, torch_dtype)
+    generated_ids = model.generate(
+      input_ids=inputs["input_ids"],
+      pixel_values=inputs["pixel_values"],
+      max_new_tokens=1024,
+      num_beams=3
+    )
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    return processor.post_process_generation(generated_text, task=task_prompt, image_size=(image.width, image.height))
 
-    # Get inout
-    list_inputs = [processor(text = prompt,
-                             images = element,
-                             return_tensors = "pt").to(device, torch_dtype) for element in images]
-    # Ids
-    with torch.no_grad():
-        generated_ids = [model.generate(
-            input_ids = input["input_ids"],
-            pixel_values = input["pixel_values"],
-            max_new_tokens = 1024,
-            num_beams = 3
-        ) for input in list_inputs]
-
-    # Text
-    generated_values = [processor.batch_decode(id,
-                                               skip_special_tokens = False)[0] for id in generated_ids]
-    # Post process
-    return [processor.post_process_generation(value,
-                                              task = task_prompt,
-                                              image_size = (image_size, image_size)) for value in generated_values]
-
-
-def normalized_bbox(data :dict,resized_size :int = 640) -> typing.List[tuple]:
+def normalized_bbox(data :dict,resized_size :int = 640):
     boxes = data["<OCR_WITH_REGION>"]["quad_boxes"]
     results = []
     # True bboxes
@@ -108,50 +73,38 @@ def main():
 
     # Get only image file
     image_files = [file for file in os.listdir(unlabeled_folder) if pathlib.Path(file).suffix in image_extensions]
-
     # Iterate
-    image_paths = [os.path.join(unlabeled_folder, file_name) for file_name in image_files]
-    # Get PIL Image
-    pil_images = [Image.open(path) for path in image_paths]
-    # Downscale
-    downscaled_images = [resize_to_fix_width_size(image) for image in pil_images]
-    # Squared image
-    squared_images = [resize_to_squared_image(image,
-                                              resize = resize_size) for image in downscaled_images]
+    for file_name in image_files:
+        # Define file path
+        file_path = os.path.join(unlabeled_folder, file_name)
+        image = Image.open(file_path)
+        # Downscale
+        resized_image = resize_to_fix_width_size(image)
+        # Resize to squared image
+        squared_image = resize_to_squared_image(resized_image,
+                                                resize = 640)
+        # Predict boxes
+        result = predict_boxes(image = squared_image, task_prompt ="<OCR_WITH_REGION>")
+        xywh = normalized_bbox(result)
 
-    batch_squared_images = get_batches(squared_images,
-                                       max_batch_size = batch_size)
-    batch_image_paths = get_batches(image_paths,
-                                    max_batch_size = batch_size)
-    # Result
-    batched_results = [predict_boxes(images = image,
-                                     task_prompt = "<OCR_WITH_REGION>") for image in batch_squared_images]
+        write_lines = []
+        for i in range(len(xywh)):
+            x,y,w,h = xywh[i]
+            # add class
+            line = f"0 {x} {y} {w} {h}\n"
+            write_lines.append(line)
+        # Save images
+        des_file_path = os.path.join(labeled_folder,file_name)
 
-    # Write down txt
-    for (batch_result,batch_path) in zip(batched_results,batch_image_paths):
-        # Get batch bbox
-        batch_bboxes = [normalized_bbox(result) for result in batch_result]
-
-        # Each element in batch
-        for (bboxes,path) in zip(batch_bboxes,batch_path):
-            lines_value = []
-            for bbox in bboxes:
-                x, y, w, h = bbox
-                lines_value.append(f"0 {x} {y} {w} {h}\n")
-
-            # Define path
-            name = pathlib.Path(path).stem
-            destination_class_path = os.path.join(labeled_folder, f"{name}.txt")
-
-            # Write to file
-            with open(destination_class_path, "w") as f:
-                f.writelines(lines_value)
-
-    # Write down squared image
-    for (image,path) in zip(squared_images,image_paths):
-        name = pathlib.Path(path).name
-        destination_image_path = os.path.join(labeled_folder,name)
-        image.save(destination_image_path)
+        name = pathlib.Path(file_name).stem
+        # Write txt
+        destination_class_path = os.path.join(labeled_folder,f"{name}.txt")
+        # Write txt
+        with open(destination_class_path, "w") as f:
+            f.writelines(write_lines)
+            
+        # Save image
+        squared_image.save(des_file_path)
 
     print(f"Labeling with {len(image_files)} files")
 
@@ -160,3 +113,4 @@ if __name__ == "__main__":
     main()
     end = time.perf_counter()
     print(f"Done in total {round(end-start,2)}s")
+
