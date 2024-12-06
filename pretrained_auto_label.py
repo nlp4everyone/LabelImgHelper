@@ -1,9 +1,5 @@
 import os, torch, pathlib, argparse, time
 import uuid
-
-from torchvision import transforms
-from torchvision.io import read_image
-from torchvision.utils import save_image
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image, ImageDraw
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -117,3 +113,4 @@ if __name__ == "__main__":
     main()
     end = time.perf_counter()
     print(f"Done in total {round(end-start,2)}s")
+
