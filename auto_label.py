@@ -10,7 +10,7 @@ parser.add_argument("-source",type = str,required = True, help = "Source directo
 parser.add_argument("-train_path",type = str, required = True, help = "Path to your train model")
 parser.add_argument("-destination",type = str, default = "labeled_folder", help = "Destination directory you want to save the images and lables")
 parser.add_argument("-resize_size",type = int,default = 640, help = "Resize image expected!")
-parser.add_argument("-batch_size",type = int,default = 4, help = "Resize image expected!")
+parser.add_argument("-batch_size",type = int,default = 1, help = "Batch size!")
 # Parse args
 args = parser.parse_args()
 unlabeled_folder = args.source
