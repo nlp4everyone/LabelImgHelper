@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-import os, torch, pathlib, argparse, time
+import os, torch, pathlib, argparse, time, typing
 from torchvision import transforms
 from torchvision.io import read_image
 from torchvision.utils import save_image
@@ -10,12 +10,14 @@ parser.add_argument("-source",type = str,required = True, help = "Source directo
 parser.add_argument("-train_path",type = str, required = True, help = "Path to your train model")
 parser.add_argument("-destination",type = str, default = "labeled_folder", help = "Destination directory you want to save the images and lables")
 parser.add_argument("-resize_size",type = int,default = 640, help = "Resize image expected!")
+parser.add_argument("-batch_size",type = int,default = 4, help = "Resize image expected!")
 # Parse args
 args = parser.parse_args()
 unlabeled_folder = args.source
 labeled_folder = args.destination
 trained_path = args.train_path
 resize_size = args.resize_size
+batch_size = args.batch_size
 
 # Check path
 if not os.path.exists(trained_path):
@@ -49,8 +51,8 @@ def resize_to_square_image(image: torch.Tensor,
     # Resize to width resize if above
     return resize_transform(image)
 
-def resize_to_fix_size_v2(image: torch.Tensor,
-                          downscale_width: int = 1024) -> torch.Tensor:
+def resize_to_fix_size(image: torch.Tensor,
+                       downscale_width: int = 1024) -> torch.Tensor:
     """
     Resize to fix size ver 2
     :param image:
@@ -79,6 +81,17 @@ def resize_to_fix_size_v2(image: torch.Tensor,
     # Resize to width resize if above
     return resize_transform(image)
 
+def get_batches(iterable :typing.List, max_batch_size :int):
+    """Yield batches of max_batch_size from iterable."""
+    batch = []
+    for element in iterable:
+        batch.append(element)
+        if len(batch) >= max_batch_size:
+            yield batch
+            batch = []
+    if batch:  # Yield any remaining elements as the last batch
+        yield batch
+
 def main():
     # Make labeled folder
     os.makedirs(labeled_folder, exist_ok = True)
@@ -88,47 +101,60 @@ def main():
 
     # Get only image file
     image_files = [file for file in os.listdir(unlabeled_folder) if pathlib.Path(file).suffix in image_extensions]
-    # Iterate
-    for file_name in image_files:
-        # Define file path
-        file_path = os.path.join(unlabeled_folder, file_name)
-        # image tensor
-        image_tensor = read_image(file_path)
-        # Resize to fix size
-        image_tensor = resize_to_fix_size_v2(image_tensor)
-        # Resize to square image
-        squared_image_tensor = resize_to_square_image(image_tensor, size = resize_size)
-        squared_image_tensor = squared_image_tensor.float() / 255.0
+    # Get path
+    image_paths = [os.path.join(unlabeled_folder, file_name) for file_name in image_files]
+    batch_images = get_batches(image_paths,
+                               max_batch_size = batch_size)
+
+    # Iterate each batch
+    for batch_image in batch_images:
+        # images
+        tensor_images = [read_image(file_path) for file_path in batch_image]
+        # Downscale
+        downscaled_images = [resize_to_fix_size(image) for image in tensor_images]
+        # Convert to squared image
+        squared_images = [resize_to_square_image(image,
+                                                 size = resize_size) for image in downscaled_images]
+        # Stack images
+        stacked_images = torch.stack(squared_images, dim = 0)
+        # Normalized image
+        normalized_image = stacked_images.float()/255.0
 
         # Predict
-        results = yolo.predict(squared_image_tensor)
-        # Bbox
-        bboxes = results[0].boxes.xywh.int().tolist()
-        class_dict = results[0].names
-        predicted_class = results[0].boxes.cls.int().tolist()
+        results = yolo.predict(normalized_image)
+        # For each result
+        for (index,result) in enumerate(results):
+            # Bbox
+            bboxes = result.boxes.xywh.int().tolist()
+            # Predicted
+            predicted_class = result.boxes.cls.int().tolist()
 
-        write_lines = []
-        for i in range(len(predicted_class)):
-            # Define coordination
-            x,y,w,h = tuple(bboxes[i])
-            # Scaled
-            x_scaled, y_scaled, w_scaled, h_scaled = x/resize_size, y/resize_size, w/resize_size, h/resize_size
-            # Define class
-            cls = predicted_class[i]
-            line = f"{cls} {x_scaled} {y_scaled} {w_scaled} {h_scaled}\n"
-            write_lines.append(line)
+            write_lines = []
+            for i in range(len(predicted_class)):
+                # Define coordination
+                x,y,w,h = tuple(bboxes[i])
+                # Scaled
+                x_scaled, y_scaled, w_scaled, h_scaled = x/resize_size, y/resize_size, w/resize_size, h/resize_size
+                # Define class
+                cls = predicted_class[i]
+                line = f"{cls} {x_scaled} {y_scaled} {w_scaled} {h_scaled}\n"
+                write_lines.append(line)
 
-        # Save images
-        des_file_path = os.path.join(labeled_folder,file_name)
-        save_image(tensor = squared_image_tensor,
-                   fp = des_file_path)
+            for image_path in batch_image:
+                image_full_name = pathlib.Path(image_path).name
+                image_name = pathlib.Path(image_path).stem
+                # Define full path
+                dest_image_path = os.path.join(labeled_folder,image_full_name)
+                # Save image
+                save_image(tensor = squared_images[index].float()/255.0,
+                           fp = dest_image_path)
 
-        name = pathlib.Path(file_name).stem
-        # Write txt
-        destination_class_path = os.path.join(labeled_folder,f"{name}.txt")
-        # Write
-        with open(destination_class_path,"w") as f:
-            f.writelines(write_lines)
+                # Write txt
+                des_class_path = os.path.join(labeled_folder,f"{image_name}.txt")
+                # Write
+                with open(des_class_path,"w") as f:
+                    f.writelines(write_lines)
+
     print(f"Labeling with {len(image_files)} files")
 
 if __name__ == "__main__":
